@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+</head>
+<body>
+<h3> Local Video </h3>
+<input type="file" id="videoFileInput" accept="video/*"> <br />
+<video id="localVideo" autoplay loop></video> <br />
+
+<h3> Remote Video </h3>
+<div id="remoteVideos"></div> <br />
+
+<h3> Logs </h3>
+<div id="logs"></div>
+
+<h3> Bitrate Logs </h3>
+<div id="bitrateLogs"></div>
+
+<h3> Available Outgoing Bitrate </h3>
+<div id="availableBitrateLogs"></div>
+
+</body>
+
+<script>
+  const fileInput = document.getElementById('videoFileInput');
+  const localVideo = document.getElementById('localVideo');
+  let dataChannel; // Declare dataChannel globally
+
+  fileInput.addEventListener('change', function(event) {
+    const file = event.target.files[0];
+    if (file) {
+      const url = URL.createObjectURL(file);
+      localVideo.src = url;
+
+      localVideo.onloadeddata = () => {
+        const stream = localVideo.captureStream();
+        stream.getVideoTracks().forEach(track => {
+          track.applyConstraints({
+            // width: { min: 1920, exact: 1920, max: 1920 },
+            // height: { min: 1x080, exact: 1080, max: 1080 },
+            // frameRate: { min: 1, exact: 1 , max: 1}
+          }).then(() => {
+            console.log('Current constraints:', track.getConstraints());
+          }).catch(e => console.error('Constraint error:', e));
+        });
+        setupPeerConnection(stream);
+      };
+    }
+  });
+
+  function setupPeerConnection(stream) {
+    let pc = new RTCPeerConnection();
+
+    let dataChannel = pc.createDataChannel("metricsChannel");
+    dataChannel.onopen = () => console.log("✅ Data channel opened");
+    dataChannel.onmessage = (event) => console.log("✅ Message from server:", event.data);
+
+    // Add video and audio tracks from the file
+    stream.getTracks().forEach(track => pc.addTrack(track, stream));
+
+    const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+    if (sender) {
+      const params = sender.getParameters();
+      if (!params.encodings) {
+        params.encodings = [{}];
+      }
+      params.encodings[0].maxBitrate = 100_000_000; // Set max bitrate
+      params.encodings[0].degradationPreference = "disabled";
+      sender.setParameters(params).catch(e => console.error('Failed to set parameters:', e));
+    }
+
+    pc.ontrack = function (event) {
+      if (event.track.kind === 'audio') return;
+
+      let el = document.createElement(event.track.kind);
+      el.srcObject = event.streams[0];
+      el.autoplay = true;
+      el.controls = true;
+      document.getElementById('remoteVideos').appendChild(el);
+
+      const logStats = () => {
+        pc.getStats(null).then(stats => {
+          stats.forEach(report => {
+            if (report.type === 'inbound-rtp' && report.kind === 'video') {
+              const bitrate = (report.bytesReceived - (logStats.lastBytes || 0)) * 8 / (report.timestamp - (logStats.lastTimestamp || report.timestamp));
+              logStats.lastTimestamp = report.timestamp;
+              logStats.lastBytes = report.bytesReceived;
+
+              const [videoTrack] = event.streams[0].getVideoTracks();
+              if (videoTrack) {
+                const { width, height, frameRate } = videoTrack.getSettings();
+                document.getElementById('logs').innerText = `Resolution: ${width}x${height}, Frame rate: ${frameRate} fps`;
+                document.getElementById('bitrateLogs').innerText = `Bitrate: ${Math.round(bitrate)} kbps`;
+                console.log("ready state:", dataChannel.readyState)
+                if (dataChannel && dataChannel.readyState === 'open') {
+                  const metric = {
+                    resolution: `${width}x${height}`,
+                    frameRate: frameRate,
+                    bitrateKbps: Math.round(bitrate),
+                    timestamp: Date.now()
+                  };
+                  dataChannel.send(JSON.stringify(metric));
+                  console.log("Metric sent:", metric);
+                }
+              }
+            }
+
+            if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.availableOutgoingBitrate) {
+              const availableBitrateKbps = Math.round(report.availableOutgoingBitrate / 1000);
+              document.getElementById('availableBitrateLogs').innerText = `Available Outgoing Bitrate: ${availableBitrateKbps} kbps`;
+            }
+          });
+        }).catch(e => console.error('Error fetching stats:', e));
+      };
+      setInterval(logStats, 1000);
+
+      event.track.onmute = function() {
+        el.play();
+      };
+
+      event.streams[0].onremovetrack = ({ track }) => {
+        if (el.parentNode) {
+          el.parentNode.removeChild(el);
+        }
+      };
+    };
+
+    let ws = new WebSocket("{{.}}");
+
+    pc.onicecandidate = e => {
+      if (e.candidate) {
+        ws.send(JSON.stringify({ event: 'candidate', data: JSON.stringify(e.candidate) }));
+      }
+    };
+
+    ws.onmessage = async (msg) => {
+      const message = JSON.parse(msg.data);
+      switch (message.event) {
+        case 'offer':
+          const offer = JSON.parse(message.data);
+          await pc.setRemoteDescription(offer);
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          ws.send(JSON.stringify({ event: 'answer', data: JSON.stringify(answer) }));
+          break;
+        case 'candidate':
+          const candidate = JSON.parse(message.data);
+          await pc.addIceCandidate(candidate);
+          break;
+      }
+    };
+
+    pc.onicecandidate = e => {
+      if (e.candidate) {
+        ws.send(JSON.stringify({ event: 'candidate', data: JSON.stringify(e.candidate) }));
+      }
+    };
+  }
+</script>
+</html>

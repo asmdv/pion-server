@@ -61,6 +61,11 @@ class _MyAppState extends State<MyApp> {
 
   String localResolution = 'N/A';
 
+  // Add a variable to hold the data channel
+  RTCDataChannel? _dataChannel;
+// Add a list to hold log messages for display (optional, but good for UI)
+  final List<String> _logMessages = [];
+
   WebSocketChannel? _socket;
   RTCPeerConnection? _peerConnection; // Make nullable for late init safety
   Timer? _statsTimer; // Add variable to hold the timer instance
@@ -86,6 +91,25 @@ class _MyAppState extends State<MyApp> {
     // Ensure peer connection is created before use
     _peerConnection = await createPeerConnection(configuration, {}); // Pass configuration here
     final pc = _peerConnection!; // Use non-nullable reference after creation
+
+    // --- ✅ Create Data Channel ---
+    try {
+      _dataChannel = await pc.createDataChannel(
+        "chat", // Label must match if server expects a specific label, otherwise arbitrary
+        RTCDataChannelInit() // Basic configuration is usually sufficient
+          ..ordered = true, // Ensure message order
+      );
+      if (_dataChannel != null) {
+        _addLog("✅ CLIENT: Data channel created.");
+        _registerDataChannelHandlers(); // Register handlers after creation
+      } else {
+        _addLog("❌ CLIENT: Failed to create data channel.");
+      }
+    } catch (e) {
+      _addLog("❌ CLIENT: Error creating data channel: $e");
+    }
+    // --- End Data Channel Creation ---
+
 
     await _localRenderer.initialize();
     final localStream = await navigator.mediaDevices
@@ -165,7 +189,7 @@ class _MyAppState extends State<MyApp> {
           }
         }
         // *** Print the codec found in this interval (or N/A if none found) ***
-        print('Current sending codec: ${currentCodec ?? 'N/A'}');
+        // print('Current sending codec: ${currentCodec ?? 'N/A'}');
 
       } catch (e) {
         print("Error getting stats: $e");
@@ -177,6 +201,7 @@ class _MyAppState extends State<MyApp> {
     // ... (onIceCandidate, onTrack, onRemoveStream, state handlers remain the same) ...
     pc.onIceCandidate = (candidate) {
       if (candidate != null) {
+        _addLog("✅ CLIENT: Sending ICE candidate");
         _socket?.sink.add(jsonEncode({
           "event": "candidate",
           "data": jsonEncode({
@@ -335,6 +360,48 @@ class _MyAppState extends State<MyApp> {
       _dispose();
     });
   }
+
+  // --- ✅ Add Helper Function to Register Data Channel Handlers ---
+  void _registerDataChannelHandlers() {
+    _dataChannel?.onDataChannelState = (state) {
+      _addLog("✅ CLIENT: DataChannel state: $state");
+      if (state == RTCDataChannelState.RTCDataChannelOpen) {
+        _addLog("✅ CLIENT: DataChannel open. Sending 'hello world'.");
+        try {
+          _dataChannel?.send(RTCDataChannelMessage("hello world"));
+        } catch (e) {
+          _addLog("❌ CLIENT: Error sending message: $e");
+        }
+      }
+    };
+
+    _dataChannel?.onMessage = (message) {
+      if (message.type == MessageType.text) {
+        _addLog("✅ CLIENT: Received message: ${message.text}");
+        // You could check here if message.text == "hello world accepted"
+      } else {
+        _addLog("✅ CLIENT: Received binary message (length: ${message.binary.length})");
+      }
+    };
+
+    // Optional: Add onError handler if needed
+    // _dataChannel?.onError = (error) {
+    //   _addLog("❌ CLIENT: DataChannel error: $error");
+    // };
+  }
+// --- End Helper Function ---
+
+  // --- ✅ Add Helper Function for Logging ---
+  void _addLog(String log) {
+    print(log); // Print to console
+    if (mounted) { // Check if the widget is still in the tree
+      setState(() {
+        _logMessages.insert(0, "${DateTime.now().toIso8601String()}: $log"); // Add to list for UI
+      });
+    }
+  }
+// --- End Logging Helper ---
+
 
   // ... (Keep helper functions: preferVideoCodec, ensurePacketizationMode) ...
   String preferVideoCodec(String sdp, String codecMimeType) {

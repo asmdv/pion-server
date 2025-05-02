@@ -420,9 +420,45 @@ func websocketHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	m := &webrtc.MediaEngine{}
-	if err := m.RegisterDefaultCodecs(); err != nil {
+
+	// --- Explicitly Register  Codecs to Prioritize H264 ---
+	// Register Opus Audio
+	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2, SDPFmtpLine: "minptime=10;useinbandfec=1", RTCPFeedback: nil},
+		PayloadType:        111, // Standard PT for Opus
+	}, webrtc.RTPCodecTypeAudio); err != nil {
 		panic(err)
 	}
+
+	// Register H264 Video (PRIORITY 1)
+	// Make sure to include packetization-mode=1 for compatibility
+	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType:     webrtc.MimeTypeH264,
+			ClockRate:    90000,
+			Channels:     0,
+			SDPFmtpLine:  "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f", // Baseline profile, packetization-mode=1
+			RTCPFeedback: []webrtc.RTCPFeedback{{Type: "goog-remb", Parameter: ""}, {Type: "ccm", Parameter: "fir"}, {Type: "nack", Parameter: ""}, {Type: "nack", Parameter: "pli"}},
+		},
+		PayloadType: 102, // Example Payload Type for H264 (ensure it doesn't clash)
+	}, webrtc.RTPCodecTypeVideo); err != nil {
+		panic(err)
+	}
+
+	// Register VP8 Video (PRIORITY 2)
+	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType:     webrtc.MimeTypeVP8,
+			ClockRate:    90000,
+			Channels:     0,
+			SDPFmtpLine:  "", // VP8 typically doesn't need fmtp lines like H264
+			RTCPFeedback: []webrtc.RTCPFeedback{{Type: "goog-remb", Parameter: ""}, {Type: "ccm", Parameter: "fir"}, {Type: "nack", Parameter: ""}, {Type: "nack", Parameter: "pli"}},
+		},
+		PayloadType: 96, // Example Payload Type for VP8
+	}, webrtc.RTPCodecTypeVideo); err != nil {
+		panic(err)
+	}
+	// --- End Explicit Codec Registration ---
 
 	// Create a new PacketDelayCalculator
 	packetDelayCalculator := NewPacketDelayCalculator()
@@ -471,25 +507,44 @@ func websocketHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// ✅ Add Data Channel Handler
+	// ✅ Add Data Channel Handler (UNCOMMENTED AND IMPLEMENTED)
 	peerConnection.OnDataChannel(func(d *webrtc.DataChannel) {
-		mainLogger.Infof("✅ New DataChannel '%s' created by the browser\n", d.Label())
+		mainLogger.Infof("✅ SERVER: New DataChannel '%s'-%d created by remote peer\n", d.Label(), d.ID())
 
 		// Handle when the data channel is opened
 		d.OnOpen(func() {
-			mainLogger.Infof("✅ DataChannel '%s'-'%d' is open\n", d.Label(), d.ID())
+			mainLogger.Infof("✅ SERVER: DataChannel '%s'-%d is open\n", d.Label(), d.ID())
 		})
 
 		// Handle incoming messages on the data channel
 		d.OnMessage(func(msg webrtc.DataChannelMessage) {
-			mainLogger.Infof("✅ Received message on DataChannel '%s': %s\n", d.Label(), string(msg.Data))
+			receivedMsg := string(msg.Data)
+			mainLogger.Infof("✅ SERVER: Received message on DataChannel '%s': %s\n", d.Label(), receivedMsg) // Log received message
+
+			// Check if the message is "hello world" and send reply
+			if receivedMsg == "hello world" {
+				replyMsg := "hello world accepted"
+				mainLogger.Infof("✅ SERVER: Sending reply: '%s'\n", replyMsg) // Log sending reply
+				if err := d.SendText(replyMsg); err != nil {
+					mainLogger.Errorf("❌ SERVER: Failed to send message on DataChannel '%s': %v", d.Label(), err)
+				}
+			} else {
+				mainLogger.Infof("✅ SERVER: Received unexpected message: '%s'\n", receivedMsg)
+			}
 		})
 
 		// Handle when the data channel is closed
 		d.OnClose(func() {
-			mainLogger.Infof("❌ DataChannel '%s'-'%d' is closed\n", d.Label(), d.ID())
+			mainLogger.Infof("❌ SERVER: DataChannel '%s'-%d is closed\n", d.Label(), d.ID())
+		})
+
+		// Handle errors on the data channel
+		d.OnError(func(err error) {
+			mainLogger.Errorf("❌ SERVER: DataChannel '%s'-%d Error: %v\n", d.Label(), d.ID(), err)
 		})
 	})
+	// --- End Data Channel Handler ---
+
 	// Wait until our Bandwidth Estimator has been created
 	estimator := <-estimatorChan
 	bitrateTicker := time.NewTicker(500 * time.Millisecond)
@@ -564,7 +619,8 @@ func websocketHandler(w http.ResponseWriter, r *http.Request) {
 	})
 
 	peerConnection.OnTrack(func(t *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
-		mainLogger.Infof("Got remote track: Kind=%s, ID=%s, PayloadType=%d", t.Kind(), t.ID(), t.PayloadType())
+		codec := t.Codec()
+		mainLogger.Infof("Got remote track: Kind=%s, ID=%s, StreamID=%s, Codec=%s, PayloadType=%d, SSRC=%d", t.Kind(), t.ID(), t.StreamID(), codec.MimeType, codec.PayloadType, t.SSRC())
 		// Create a track to fan out our incoming video to all peers
 		trackLocal := addTrack(t)
 

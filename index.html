@@ -20,6 +20,9 @@
 <h3> Available Outgoing Bitrate </h3>
 <div id="availableBitrateLogs"></div>
 
+<h3> Codec Info </h3>
+<div id="codecLogs"></div>
+
 </body>
 
 <script>
@@ -80,40 +83,74 @@
       document.getElementById('remoteVideos').appendChild(el);
 
       const logStats = () => {
-        pc.getStats(null).then(stats => {
-          stats.forEach(report => {
-            if (report.type === 'inbound-rtp' && report.kind === 'video') {
-              const bitrate = (report.bytesReceived - (logStats.lastBytes || 0)) * 8 / (report.timestamp - (logStats.lastTimestamp || report.timestamp));
-              logStats.lastTimestamp = report.timestamp;
-              logStats.lastBytes = report.bytesReceived;
+        // Store last values for bitrate calculation (using closure)
+        let lastBytes = 0;
+        let lastTimestamp = 0;
 
-              const [videoTrack] = event.streams[0].getVideoTracks();
-              if (videoTrack) {
-                const { width, height, frameRate } = videoTrack.getSettings();
-                document.getElementById('logs').innerText = `Resolution: ${width}x${height}, Frame rate: ${frameRate} fps`;
-                document.getElementById('bitrateLogs').innerText = `Bitrate: ${Math.round(bitrate)} kbps`;
-                console.log("ready state:", dataChannel.readyState)
-                if (dataChannel && dataChannel.readyState === 'open') {
-                  const metric = {
-                    resolution: `${width}x${height}`,
-                    frameRate: frameRate,
-                    bitrateKbps: Math.round(bitrate),
-                    timestamp: Date.now()
-                  };
-                  dataChannel.send(JSON.stringify(metric));
-                  console.log("Metric sent:", metric);
+        return () => { // Return the actual function to be called by setInterval
+          pc.getStats(null).then(stats => {
+            let currentCodecId = null; // Variable to store codecId from inbound stream
+            let codecMimeType = 'N/A'; // Default value
+
+            // --- First pass: Find inbound video stream and its codecId ---
+            stats.forEach(report => {
+              if (report.type === 'inbound-rtp' && report.kind === 'video') {
+                // Calculate bitrate (existing logic)
+                const bitrate = (report.bytesReceived - lastBytes) * 8 / (report.timestamp - lastTimestamp || 1); // Avoid division by zero on first run
+                lastTimestamp = report.timestamp;
+                lastBytes = report.bytesReceived;
+                document.getElementById('bitrateLogs').innerText = `Bitrate: ${Math.round(bitrate / 1000)} kbps`; // Display in kbps
+
+                // Store the codecId for lookup
+                currentCodecId = report.codecId;
+
+                // Get resolution/framerate (existing logic)
+                const [videoTrack] = event.streams[0].getVideoTracks();
+                if (videoTrack) {
+                  const { width, height, frameRate } = videoTrack.getSettings();
+                  document.getElementById('logs').innerText = `Resolution: ${width}x${height}, Frame rate: ${frameRate ? frameRate.toFixed(2) : 'N/A'} fps`;
+
+                  // Send metrics via data channel (existing logic)
+                  if (dataChannel && dataChannel.readyState === 'open') {
+                    const metric = {
+                      resolution: `${width}x${height}`,
+                      frameRate: frameRate,
+                      bitrateKbps: Math.round(bitrate / 1000),
+                      timestamp: Date.now()
+                    };
+                    // dataChannel.send(JSON.stringify(metric)); // Uncomment if needed
+                    // console.log("Metric sent:", metric);
+                  }
                 }
+              }
+
+              // Get available outgoing bitrate (existing logic)
+              if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.nominated && report.availableOutgoingBitrate !== undefined) {
+                const availableBitrateKbps = Math.round(report.availableOutgoingBitrate / 1000);
+                document.getElementById('availableBitrateLogs').innerText = `Available Outgoing Bitrate: ${availableBitrateKbps} kbps`;
+              }
+            });
+
+            // --- Second pass/Lookup: Find the codec details using the codecId ---
+            if (currentCodecId) {
+              const codecReport = stats.get(currentCodecId); // Look up the codec report by its ID
+              if (codecReport && codecReport.mimeType) {
+                codecMimeType = codecReport.mimeType;
+                // Optionally add clockRate or sdpFmtpLine if needed
+                // codecMimeType += ` (ClockRate: ${codecReport.clockRate})`;
               }
             }
 
-            if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.availableOutgoingBitrate) {
-              const availableBitrateKbps = Math.round(report.availableOutgoingBitrate / 1000);
-              document.getElementById('availableBitrateLogs').innerText = `Available Outgoing Bitrate: ${availableBitrateKbps} kbps`;
-            }
-          });
-        }).catch(e => console.error('Error fetching stats:', e));
-      };
-      setInterval(logStats, 1000);
+            // --- Update the Codec Info display ---
+            document.getElementById('codecLogs').innerText = `Codec: ${codecMimeType}`;
+
+          }).catch(e => console.error('Error fetching stats:', e));
+        }; // End of returned function
+      }; // End of logStats definition
+
+      // Initialize and start the interval timer
+      setInterval(logStats(), 1000); // Call logStats() to get the inner function
+
 
       event.track.onmute = function() {
         el.play();

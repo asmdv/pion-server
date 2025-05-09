@@ -92,7 +92,7 @@ class _MyAppState extends State<MyApp> {
     _peerConnection = await createPeerConnection(configuration, {}); // Pass configuration here
     final pc = _peerConnection!; // Use non-nullable reference after creation
 
-    // --- ✅ Create Data Channel ---
+    // --- Create Data Channel ---
     try {
       _dataChannel = await pc.createDataChannel(
         "chat", // Label must match if server expects a specific label, otherwise arbitrary
@@ -167,28 +167,34 @@ class _MyAppState extends State<MyApp> {
         final pc = _peerConnection!;
         final senders = await pc.senders;
         String? currentCodec; // Variable to hold the codec for this second interval
+        num? currentTargetBitrate; // Variable to hold the target bitrate
 
         for (var sender in senders) {
           if (sender.track?.kind == 'video') {
             var stats = await sender.getStats();
 
             stats.forEach((report) {
+
               var reportId = report.id;
-              if (report.type == 'outbound-rtp' && report.values['mediaType'] == 'video') {
+              if (report.type == 'outbound-rtp') {
                 var mime = report.values["mimeType"];
-                // *** Store the codec found in this report ***
                 if (mime != null) {
                   currentCodec = mime;
                 }
-                // Optional: Keep detailed stats print for debugging
-                print("Stats (ID: $reportId) - MimeType: $mime, CodecId: ${report.values['codecId']}, FrameWidth: ${report.values['frameWidth']}, FrameHeight: ${report.values['frameHeight']}, FramesPerSecond: ${report.values['framesPerSecond']}, QualityLimitationReason: ${report.values['qualityLimitationReason']}");
+
+                currentTargetBitrate = report.values['targetBitrate'];
+                // print("currentTargetBitrate: $currentTargetBitrate");
+
+                // print("Stats (ID: $reportId) - MimeType: $mime, CodecId: ${report.values['codecId']}, FrameWidth: ${report.values['frameWidth']}, FrameHeight: ${report.values['frameHeight']}, FramesPerSecond: ${report.values['framesPerSecond']}, QualityLimitationReason: ${report.values['qualityLimitationReason']}");
               }
             });
-            // If we found a codec for this sender, break (assuming one main video sender)
-            if (currentCodec != null) break;
+            // If we found data for this sender, break (assuming one main video sender)
+            if (currentCodec != null || currentTargetBitrate != null) break;
           }
         }
-        // *** Print the codec found in this interval (or N/A if none found) ***
+        // *** Print the target bitrate found in this interval (or N/A if none found) ***
+        print('Current sending target bitrate: ${currentTargetBitrate ?? 'N/A'} bps');
+        // Optional: Print codec as well
         // print('Current sending codec: ${currentCodec ?? 'N/A'}');
 
       } catch (e) {
@@ -196,6 +202,7 @@ class _MyAppState extends State<MyApp> {
       }
     });
     // --- End Timer ---
+
 
 
     // ... (onIceCandidate, onTrack, onRemoveStream, state handlers remain the same) ...
@@ -384,10 +391,6 @@ class _MyAppState extends State<MyApp> {
       }
     };
 
-    // Optional: Add onError handler if needed
-    // _dataChannel?.onError = (error) {
-    //   _addLog("❌ CLIENT: DataChannel error: $error");
-    // };
   }
 // --- End Helper Function ---
 
@@ -554,7 +557,6 @@ class _MyAppState extends State<MyApp> {
     return sdp; // Should not happen, but return original just in case
   }
 
-  // --- Updated _dispose method ---
   Future<void> _dispose() async {
     print("Disposing resources...");
     // Cancel the stats timer
@@ -598,7 +600,6 @@ class _MyAppState extends State<MyApp> {
     }
     print("Resources disposed.");
   }
-  // --- End Updated _dispose method ---
 
 
   @override
@@ -660,5 +661,3 @@ class _MyAppState extends State<MyApp> {
     );
   }
 }
-
-// ... (Keep commented out helper function if needed) ...

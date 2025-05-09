@@ -507,7 +507,6 @@ func websocketHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// ✅ Add Data Channel Handler (UNCOMMENTED AND IMPLEMENTED)
 	peerConnection.OnDataChannel(func(d *webrtc.DataChannel) {
 		mainLogger.Infof("✅ SERVER: New DataChannel '%s'-%d created by remote peer\n", d.Label(), d.ID())
 
@@ -549,18 +548,6 @@ func websocketHandler(w http.ResponseWriter, r *http.Request) {
 	estimator := <-estimatorChan
 	bitrateTicker := time.NewTicker(500 * time.Millisecond)
 	defer bitrateTicker.Stop() // Ensure the ticker is stopped when done
-
-	// // Create new PeerConnection
-	// peerConnection, err := api.NewPeerConnection(webrtc.Configuration{
-	// 	RTCPMuxPolicy:      webrtc.RTCPMuxPolicyRequire,
-	// 	ICETransportPolicy: webrtc.ICETransportPolicyAll,
-	// 	BundlePolicy:       webrtc.BundlePolicyBalanced,
-	// 	SDPSemantics:       webrtc.SDPSemanticsUnifiedPlan,
-	// })
-	// if err != nil {
-	// 	mainLogger.Errorf("Failed to creates a PeerConnection: %v", err)
-	// 	return
-	// }
 
 	// When this frame returns close the PeerConnection
 	defer peerConnection.Close() //nolint
@@ -660,14 +647,7 @@ func websocketHandler(w http.ResponseWriter, r *http.Request) {
 					if t.Kind().String() == "video" {
 						targetBitrate := estimator.GetTargetBitrate()
 						_ = targetBitrate
-						//inter := estimator.GetStats()
-						//mainLogger.Infof("Inter: %v\n", inter)
-						//for rid, tracker := range bitrateTrackers {
-						//	bitrate := tracker.GetBitrate()
-						//delay := tracker.GetDelay()
-						//bitrateLogger.Infof("Stream %s: Current Bitrate %v kbps | Target: %v kbps\n", rid, int(bitrate)/1000, targetBitrate/1000)
-						// mainLogger.Infof("Stream %s: Delay: %v\n", rid, delay)
-						//}
+
 						stats := statsGetter.Get(uint32(t.SSRC()))
 
 						tracker := bitrateTrackers[trackLocal.Kind().String()]
@@ -685,25 +665,6 @@ func websocketHandler(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}()
-
-		//go func() {
-		//	// Print the stats for this individual track
-		//	for {
-		//		stats := statsGetter.Get(uint32(t.SSRC()))
-		//
-		//		mainLogger.Infof("Stats for: %v\n", t.SSRC())
-		//		mainLogger.Infof(": %v", stats.InboundRTPStreamStats)
-		//
-		//		time.Sleep(time.Second * 5)
-		//	}
-		//}()
-
-		//go func() {
-		//	for {
-		//		time.Sleep(1 * time.Second)
-		//		getInboundRTPStreamStats(peerConnection)
-		//	}
-		//}()
 
 		for {
 			i, _, err := t.Read(buf)

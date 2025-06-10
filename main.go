@@ -44,6 +44,7 @@ var (
 
 	mainLogger    = logging.NewDefaultLoggerFactory().NewLogger("sfu-ws")
 	bitrateLogger = logging.NewDefaultLoggerFactory().NewLogger("bitrate")
+	//pacer         *gcc.LeakyBucketPacer
 )
 
 // Logger struct holds the log file and logger instance
@@ -100,6 +101,7 @@ type websocketMessage struct {
 type peerConnectionState struct {
 	peerConnection *webrtc.PeerConnection
 	websocket      *threadSafeWriter
+	clientType     string
 }
 
 // BitrateTracker helps calculate bitrate for a specific track
@@ -208,7 +210,7 @@ func main() {
 
 	// index.html handler
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if err = indexTemplate.Execute(w, "ws://"+r.Host+"/websocket"); err != nil {
+		if err = indexTemplate.Execute(w, "ws://"+r.Host+"/websocket?client=server"); err != nil {
 			mainLogger.Errorf("Failed to parse index template: %v", err)
 		}
 	})
@@ -300,9 +302,29 @@ func signalPeerConnections() {
 			// Add all track we aren't sending yet to the PeerConnection
 			for trackID := range trackLocals {
 				if _, ok := existingSenders[trackID]; !ok {
-					if _, err := peerConnections[i].peerConnection.AddTrack(trackLocals[trackID]); err != nil {
+					rtpSender, err := peerConnections[i].peerConnection.AddTrack(trackLocals[trackID])
+					if err != nil {
 						return true
 					}
+
+					/*if trackLocals[trackID].Kind() == webrtc.RTPCodecTypeVideo {
+						ssrc := uint32(trackLocals[trackID].SSRC())
+						err := pacer.AddStream(ssrc, rtpSender)
+						if err != nil {
+							mainLogger.Errorf("Failed to AddStream to pacer for SSRC=%d: %v", ssrc, err)
+						} else {
+							mainLogger.Infof("Pacer AddStream successful for SSRC=%d", ssrc)
+						}
+					}*/
+
+					go func(sender *webrtc.RTPSender) {
+						rtcpBuf := make([]byte, 1500)
+						for {
+							if _, _, err := sender.Read(rtcpBuf); err != nil {
+								return
+							}
+						}
+					}(rtpSender)
 				}
 			}
 
@@ -384,6 +406,8 @@ func getInboundRTPStreamStats(peerConnection *webrtc.PeerConnection) {
 // Handle incoming websockets
 func websocketHandler(w http.ResponseWriter, r *http.Request) {
 
+	clientType := r.URL.Query().Get("client")
+
 	// Upgrade HTTP request to Websocket
 	unsafeConn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -396,7 +420,7 @@ func websocketHandler(w http.ResponseWriter, r *http.Request) {
 		log.Fatalf("Could not create statsLogger: %v", err)
 	}
 	defer statsLogger.Close()
-	statsLogger.Infof("Timestamp,Kind,PacketsReceived,PacketsLost,LossRation,Jitter,CurrentBitrate,TargetBitrate")
+	statsLogger.Infof("SSRC,Timestamp,Kind,PacketsReceived,PacketsLost,LossRation,Jitter,CurrentBitrate,TargetBitrate")
 
 	c := &threadSafeWriter{unsafeConn, sync.Mutex{}}
 
@@ -468,12 +492,18 @@ func websocketHandler(w http.ResponseWriter, r *http.Request) {
 	//
 	// Passing `nil` means we use the default Estimation Algorithm which is Google Congestion Control.
 	// You can use the other ones that Pion provides, or write your own!
+	//pacer = gcc.NewLeakyBucketPacer(2_000_000)
 	congestionController, err := cc.NewInterceptor(func() (cc.BandwidthEstimator, error) {
-		return gcc.NewSendSideBWE(gcc.SendSideBWEInitialBitrate(500_000))
+		return gcc.NewSendSideBWE(
+			gcc.SendSideBWEInitialBitrate(2_000_000),
+			//gcc.SendSideBWEPacer(pacer),
+		)
 	})
 	if err != nil {
 		panic(err)
 	}
+
+	//go pacer.Run()
 
 	estimatorChan := make(chan cc.BandwidthEstimator, 1)
 	congestionController.OnNewPeerConnection(func(id string, estimator cc.BandwidthEstimator) { //nolint: revive
@@ -546,7 +576,7 @@ func websocketHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Wait until our Bandwidth Estimator has been created
 	estimator := <-estimatorChan
-	bitrateTicker := time.NewTicker(500 * time.Millisecond)
+	bitrateTicker := time.NewTicker(1000 * time.Millisecond)
 	defer bitrateTicker.Stop() // Ensure the ticker is stopped when done
 
 	// When this frame returns close the PeerConnection
@@ -564,7 +594,7 @@ func websocketHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Add our new PeerConnection to global list
 	listLock.Lock()
-	peerConnections = append(peerConnections, peerConnectionState{peerConnection, c})
+	peerConnections = append(peerConnections, peerConnectionState{peerConnection, c, clientType})
 	listLock.Unlock()
 
 	// Trickle ICE. Emit server candidate to client
@@ -606,6 +636,16 @@ func websocketHandler(w http.ResponseWriter, r *http.Request) {
 	})
 
 	peerConnection.OnTrack(func(t *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
+		var clientType string
+		pc := peerConnection
+		listLock.RLock()
+		for _, conn := range peerConnections {
+			if conn.peerConnection == pc {
+				clientType = conn.clientType
+				break
+			}
+		}
+		listLock.RUnlock()
 		codec := t.Codec()
 		mainLogger.Infof("Got remote track: Kind=%s, ID=%s, StreamID=%s, Codec=%s, PayloadType=%d, SSRC=%d", t.Kind(), t.ID(), t.StreamID(), codec.MimeType, codec.PayloadType, t.SSRC())
 		// Create a track to fan out our incoming video to all peers
@@ -616,27 +656,23 @@ func websocketHandler(w http.ResponseWriter, r *http.Request) {
 
 		defer removeTrack(trackLocal)
 
-		rtpSender, err := peerConnection.AddTrack(trackLocal)
-		if err != nil {
-			panic(err)
-		}
-
 		// Read incoming RTCP packets
 		// Before these packets are returned they are processed by interceptors. For things
 		// like NACK this needs to be called.
-		go func() {
-			rtcpBuf := make([]byte, 1500)
-			for {
-				if _, _, rtcpErr := rtpSender.Read(rtcpBuf); rtcpErr != nil {
-					return
-				}
-			}
-		}()
 
 		buf := make([]byte, 1500)
 		rtpPkt := &rtp.Packet{}
 
 		go func() {
+			rtcpBuf := make([]byte, 1500)
+			for {
+				if _, _, err := receiver.Read(rtcpBuf); err != nil {
+					return
+				}
+			}
+		}()
+
+		go func(clientType string) {
 			var oldBytes int64 = 0
 			var oldPacketsReceived uint64 = 0
 			var oldPacketsLost int64 = 0
@@ -645,6 +681,9 @@ func websocketHandler(w http.ResponseWriter, r *http.Request) {
 				select {
 				case <-bitrateTicker.C: // Wait for the next tick
 					if t.Kind().String() == "video" {
+						if clientType != "client" {
+							continue
+						}
 						targetBitrate := estimator.GetTargetBitrate()
 						_ = targetBitrate
 
@@ -654,7 +693,7 @@ func websocketHandler(w http.ResponseWriter, r *http.Request) {
 						bitrate := tracker.GetBitrate()
 						_ = bitrate
 						bitrateLogger.Infof("t.SSRC: %v, t.Kind: %v, Received: %v, Lost: %v, Ratio: %.2f, Jitter: %.2f, Bitrate: %v, Target: %v, LastPacket: %v", uint32(t.SSRC()), t.Kind(), stats.InboundRTPStreamStats.PacketsReceived-oldPacketsReceived, stats.InboundRTPStreamStats.PacketsLost-oldPacketsLost, float64(stats.InboundRTPStreamStats.PacketsLost-oldPacketsLost)/float64(stats.InboundRTPStreamStats.PacketsReceived-oldPacketsReceived), stats.InboundRTPStreamStats.Jitter, (int64(stats.InboundRTPStreamStats.BytesReceived/1000)-oldBytes)*8, targetBitrate/1000, stats.InboundRTPStreamStats.LastPacketReceivedTimestamp)
-						statsLogger.Infof("%v,%v,%v,%v,%.2f,%.2f,%v,%v", time.Now().Format("2006-01-02T15:04:05Z07:00"), t.Kind(), stats.InboundRTPStreamStats.PacketsReceived-oldPacketsReceived, stats.InboundRTPStreamStats.PacketsLost-oldPacketsLost, float64(stats.InboundRTPStreamStats.PacketsLost-oldPacketsLost)/float64(stats.InboundRTPStreamStats.PacketsReceived-oldPacketsReceived), stats.InboundRTPStreamStats.Jitter, (int64(stats.InboundRTPStreamStats.BytesReceived/1000)-oldBytes)*8, targetBitrate/1000)
+						statsLogger.Infof("%v,%v,%v,%v,%v,%.2f,%.2f,%v,%v", uint32(t.SSRC()), time.Now().Format("2006-01-02T15:04:05Z07:00"), t.Kind(), stats.InboundRTPStreamStats.PacketsReceived-oldPacketsReceived, stats.InboundRTPStreamStats.PacketsLost-oldPacketsLost, float64(stats.InboundRTPStreamStats.PacketsLost-oldPacketsLost)/float64(stats.InboundRTPStreamStats.PacketsReceived-oldPacketsReceived), stats.InboundRTPStreamStats.Jitter, (int64(stats.InboundRTPStreamStats.BytesReceived/1000)-oldBytes)*8, targetBitrate/1000)
 						//bitrateLogger.Infof("Old before: %v", oldBytes)
 						oldBytes = int64(stats.InboundRTPStreamStats.BytesReceived / 1000)
 						oldPacketsReceived = stats.InboundRTPStreamStats.PacketsReceived
@@ -664,7 +703,7 @@ func websocketHandler(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
-		}()
+		}(clientType)
 
 		for {
 			i, _, err := t.Read(buf)

@@ -1,14 +1,17 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:path_provider/path_provider.dart';
 
 // ... (Keep existing code: main, remoteHost, counter, mediaConstraints, etc.) ...
 void main() => runApp(const MyApp());
-String remoteHost = "192.168.1.185";
-// String remoteHost = "10.33.92.6";
+String remoteHost = "192.168.1.158";
+//String remoteHost = "172.16.2.37";
+//String remoteHost = "10.18.175.171";
 int counter = 0;
 
 final mediaConstraints = <String, dynamic>{
@@ -31,11 +34,8 @@ final mediaConstraints1 = <String, dynamic>{
   'audio': true,
   'video': {
     'mandatory': {
-      'minWidth': '640',
-      'minHeight': '480',
       'maxWidth': '3840',
       'maxHeight': '2160',
-      'minFrameRate': '30',
       'maxFrameRate': '60',
     },
     'facingMode': 'environment',
@@ -113,7 +113,7 @@ class _MyAppState extends State<MyApp> {
 
     await _localRenderer.initialize();
     final localStream = await navigator.mediaDevices
-        .getUserMedia(mediaConstraints);
+        .getUserMedia(mediaConstraints1);
     _localRenderer.srcObject = localStream;
 
     // Add tracks
@@ -121,7 +121,6 @@ class _MyAppState extends State<MyApp> {
       await pc.addTrack(track, localStream);
       print("Added track: ${track.kind}");
     });
-
 
     // --- Bitrate/Degradation Settings using 'parameters' property ---
     pc.senders.then((senders) {
@@ -136,7 +135,7 @@ class _MyAppState extends State<MyApp> {
             if (parameters.encodings!.isNotEmpty) {
               parameters.encodings![0].maxBitrate = 100 * 1000 * 1000; // 100 Mbps
               parameters.encodings![0].minBitrate = 1 * 1000 * 1000;   // 1 Mbps
-              parameters.degradationPreference = RTCDegradationPreference.MAINTAIN_RESOLUTION;
+              parameters.degradationPreference = RTCDegradationPreference.BALANCED;
               print("Attempting to set sender parameters: Max Bitrate=${parameters.encodings![0].maxBitrate}, Min Bitrate=${parameters.encodings![0].minBitrate}, Degradation=${parameters.degradationPreference}");
               await sender.setParameters(parameters);
               print("Successfully set sender parameters.");
@@ -152,56 +151,99 @@ class _MyAppState extends State<MyApp> {
         }
       });
     });
+  
     // --- End Bitrate/Degradation Block ---
 
+    // --- Adaptive Bitrate Controller Using Target Bitrate Reference ---
 
-    // --- Timer for Stats and Codec Printing ---
-    _statsTimer = Timer.periodic(const Duration(seconds: 1), (timer) async { // Store timer instance
-      if (mounted) {
-        setState(() {
-          localResolution = '${_localRenderer.videoWidth} x ${_localRenderer.videoHeight}';
-        });
-      }
-      try {
-        if (_peerConnection == null) return;
-        final pc = _peerConnection!;
-        final senders = await pc.senders;
-        String? currentCodec; // Variable to hold the codec for this second interval
-        num? currentTargetBitrate; // Variable to hold the target bitrate
+    // Cache variables for previous stats
+    int? _lastBytesSent;
+    DateTime? _lastTimestamp;
+    int? _lastAllocatedBitrate;
+    DateTime _lastAllocationTime = DateTime.now();
 
-        for (var sender in senders) {
-          if (sender.track?.kind == 'video') {
-            var stats = await sender.getStats();
+    const int bitrateChangeThresholdBps = 10000; // Trigger reallocation if delta > 10 kbps
+    const int allocationCooldownSec = 60;         // Reallocate at most once every 60 seconds
 
-            stats.forEach((report) {
+    // Periodic stats collection and strategy-based encoder control
+    _statsTimer = Timer.periodic(const Duration(seconds: 1), (timer) async {
+      if (!mounted || _peerConnection == null) return;
 
-              var reportId = report.id;
-              if (report.type == 'outbound-rtp') {
-                var mime = report.values["mimeType"];
-                if (mime != null) {
-                  currentCodec = mime;
+      final pc = _peerConnection!;
+      final now = DateTime.now();
+      final senders = await pc.senders;
+
+      num? targetBitrate;
+      num? currentBitrate;
+
+      for (var sender in senders) {
+        if (sender.track?.kind == 'video') {
+          final stats = await sender.getStats();
+
+          for (var report in stats) {
+            if (report.type == 'outbound-rtp') {
+              if (report.values['targetBitrate'] != null) {
+                targetBitrate = report.values['targetBitrate'];
+              }
+
+              if (report.values['bytesSent'] != null) {
+                final bytesSent = report.values['bytesSent'];
+                if (_lastBytesSent != null && _lastTimestamp != null) {
+                  final elapsedMs = now.difference(_lastTimestamp!).inMilliseconds;
+                  if (elapsedMs > 0) {
+                    currentBitrate = ((bytesSent - _lastBytesSent!) * 8) / elapsedMs;
+                  }
+                }
+                _lastBytesSent = bytesSent;
+                _lastTimestamp = now;
+              }
+            }
+          }
+
+          // Strategy-based reallocation logic
+          /*if (targetBitrate != null && targetBitrate > 0) {
+            final int newBitrate = targetBitrate.toInt();
+            final int nowMs = now.millisecondsSinceEpoch;
+
+            final bool shouldReallocate =
+                _lastAllocatedBitrate == null ||
+                (newBitrate - _lastAllocatedBitrate!).abs() > bitrateChangeThresholdBps ||
+                now.difference(_lastAllocationTime).inSeconds > allocationCooldownSec;
+
+            if (shouldReallocate) {
+              _lastAllocatedBitrate = newBitrate;
+              _lastAllocationTime = now;
+
+              try {
+                final parameters = sender.parameters;
+                if (parameters.encodings == null || parameters.encodings!.isEmpty) {
+                  parameters.encodings = [RTCRtpEncoding()];
                 }
 
-                currentTargetBitrate = report.values['targetBitrate'];
-                // print("currentTargetBitrate: $currentTargetBitrate");
+                // Apply updated max bitrate (scale as needed), degradation preference
+                parameters.encodings![0].maxBitrate = (newBitrate * 1.2).toInt();
+                parameters.degradationPreference = RTCDegradationPreference.BALANCED;
 
-                // print("Stats (ID: $reportId) - MimeType: $mime, CodecId: ${report.values['codecId']}, FrameWidth: ${report.values['frameWidth']}, FrameHeight: ${report.values['frameHeight']}, FramesPerSecond: ${report.values['framesPerSecond']}, QualityLimitationReason: ${report.values['qualityLimitationReason']}");
+                await sender.setParameters(parameters);
+                print("✅ Bitrate cap set to ${(newBitrate * 1.2 / 1000).toStringAsFixed(1)} kbps");
+              } catch (e) {
+                print("⚠️ Failed to apply sender parameters: $e");
               }
-            });
-            // If we found data for this sender, break (assuming one main video sender)
-            if (currentCodec != null || currentTargetBitrate != null) break;
-          }
-        }
-        // *** Print the target bitrate found in this interval (or N/A if none found) ***
-        print('Current sending target bitrate: ${currentTargetBitrate ?? 'N/A'} bps');
-        // Optional: Print codec as well
-        // print('Current sending codec: ${currentCodec ?? 'N/A'}');
+            } else {
+              print("⏩ Skipped bitrate update (same or too soon)");
+            }
+          }*/
 
-      } catch (e) {
-        print("Error getting stats: $e");
+          // Print bitrate info
+          final timestamp = DateTime.now().toIso8601String();
+          //print(' Target Bitrate: ${(targetBitrate ?? 0) / 1000} kbps |  Current Bitrate: ${currentBitrate?.toStringAsFixed(2) ?? 'N/A'} kbps');
+          //visualize target bitrate and current bitrate
+          print('$timestamp,${(targetBitrate ?? 0) / 1000},${currentBitrate?.toStringAsFixed(2) ?? 'N/A'}');
+          break; // Assume only one video sender is managed
+        }
       }
     });
-    // --- End Timer ---
+    // --- End Adaptive Bitrate Block ---
 
 
 
@@ -284,7 +326,7 @@ class _MyAppState extends State<MyApp> {
 
     // ... (WebSocket listener logic remains the same, including SDP manipulation) ...
     final socket =
-    WebSocketChannel.connect(Uri.parse('ws://$remoteHost:8080/websocket'));
+    WebSocketChannel.connect(Uri.parse('ws://$remoteHost:8080/websocket?client=client'));
     _socket = socket;
     socket.stream.listen((raw) async {
       Map<String, dynamic> msg = jsonDecode(raw);

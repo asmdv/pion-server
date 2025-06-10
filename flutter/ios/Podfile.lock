@@ -27,10 +27,10 @@ EXTERNAL SOURCES:
 
 SPEC CHECKSUMS:
   Flutter: e0871f40cf51350855a761d2e70bf5af5b9b5de7
-  flutter_webrtc: 90260f83024b1b96d239a575ea4e3708e79344d1
-  path_provider_foundation: 2b6b4c569c0fb62ec74538f866245ac84301af46
+  flutter_webrtc: 57f32415b8744e806f9c2a96ccdb60c6a627ba33
+  path_provider_foundation: 080d55be775b7414fd5a5ef3ac137b97b097e564
   WebRTC-SDK: 79942c006ea64f6fb48d7da8a4786dfc820bc1db
 
 PODFILE CHECKSUM: a1bb5a96309687064ad2f50edf1fc9f01ce1ea1e
 
-COCOAPODS: 1.15.2
+COCOAPODS: 1.16.2

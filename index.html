@@ -37,27 +37,37 @@
       localVideo.src = url;
 
       localVideo.onloadeddata = () => {
-        const stream = localVideo.captureStream();
-        stream.getVideoTracks().forEach(track => {
-          track.applyConstraints({
-            // width: { min: 1920, exact: 1920, max: 1920 },
-            // height: { min: 1x080, exact: 1080, max: 1080 },
-            // frameRate: { min: 1, exact: 1 , max: 1}
-          }).then(() => {
-            console.log('Current constraints:', track.getConstraints());
-          }).catch(e => console.error('Constraint error:', e));
-        });
-        setupPeerConnection(stream);
+        try {
+          const stream = localVideo.captureStream();
+          if (stream && stream.getVideoTracks().length > 0) {
+              console.log("captureStream succeeded", stream);
+            } else {
+              console.warn(" captureStream returned no tracks or null");
+            }
+          stream.getVideoTracks().forEach(track => {
+            track.applyConstraints({
+              // width: { min: 1920, exact: 1920, max: 1920 },
+              // height: { min: 1x080, exact: 1080, max: 1080 },
+              // frameRate: { min: 1, exact: 1 , max: 1}
+            }).then(() => {
+              console.log('Current constraints:', track.getConstraints());
+            }).catch(e => console.error('Constraint error:', e));
+          });
+          setupPeerConnection(stream);
+        }
+        catch (e) {
+          console.error(" captureStream() failed:", e);
+        }
       };
     }
   });
 
   function setupPeerConnection(stream) {
     let pc = new RTCPeerConnection();
-
+    const trackStats = new Map();
     let dataChannel = pc.createDataChannel("metricsChannel");
-    dataChannel.onopen = () => console.log("✅ Data channel opened");
-    dataChannel.onmessage = (event) => console.log("✅ Message from server:", event.data);
+    dataChannel.onopen = () => console.log("Data channel opened");
+    dataChannel.onmessage = (event) => console.log("Message from server:", event.data);
 
     // Add video and audio tracks from the file
     stream.getTracks().forEach(track => pc.addTrack(track, stream));
@@ -86,6 +96,7 @@
         // Store last values for bitrate calculation (using closure)
         let lastBytes = 0;
         let lastTimestamp = 0;
+        let lastReportId = null; //handle the negative bitrate bug
 
         return () => { // Return the actual function to be called by setInterval
           pc.getStats(null).then(stats => {
@@ -94,14 +105,38 @@
 
             // --- First pass: Find inbound video stream and its codecId ---
             stats.forEach(report => {
+              // Use stable SSRC as key
               if (report.type === 'inbound-rtp' && report.kind === 'video') {
-                // Calculate bitrate (existing logic)
-                const bitrate = (report.bytesReceived - lastBytes) * 8 / (report.timestamp - lastTimestamp || 1); // Avoid division by zero on first run
-                lastTimestamp = report.timestamp;
-                lastBytes = report.bytesReceived;
-                document.getElementById('bitrateLogs').innerText = `Bitrate: ${Math.round(bitrate / 1000)} kbps`; // Display in kbps
+                const ssrcKey = report.ssrc?.toString(); // convert BigInt to string
 
-                // Store the codecId for lookup
+                if (!ssrcKey) return;
+
+                const prev = trackStats.get(ssrcKey);
+
+                if (!prev) {
+                  trackStats.set(ssrcKey, {
+                    lastBytes: report.bytesReceived,
+                    lastTimestamp: report.timestamp
+                  });
+                  console.log(`New track detected (SSRC: ${ssrcKey}), skipping bitrate calc this round`);
+                  return;
+                }
+
+                const byteDiff = report.bytesReceived - prev.lastBytes;
+                const timeDiff = report.timestamp - prev.lastTimestamp || 1; // avoid div by 0
+                const bitrate = (byteDiff * 8) / timeDiff; // bits/ms = kbps
+
+                console.log(`SSRC ${ssrcKey}: Δt=${Math.round(timeDiff)}ms, bitrate=${Math.round(bitrate)} kbps`);
+
+                trackStats.set(ssrcKey, {
+                  lastBytes: report.bytesReceived,
+                  lastTimestamp: report.timestamp
+                });
+
+                // Optional: Show the latest bitrate from any track (or average if needed)
+                document.getElementById('bitrateLogs').innerText =
+                `Bitrate: ${Math.round(bitrate)} kbps`;
+
                 currentCodecId = report.codecId;
 
                 // Get resolution/framerate (existing logic)

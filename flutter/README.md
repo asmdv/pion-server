@@ -65,3 +65,8 @@ Edit`android/app/build.gradle`, modify minSdkVersion to 18
 
 - `flutter pub get`
 - `flutter run`
+
+## Several things need to check
+- remoteHost = `"your local network address"` in `main.dart`
+- trust the developer in `VPN & Device Management` in `General ` on your ios device
+- Wireless Data choosing `WLAN & Cellular` in the setting of flutter app

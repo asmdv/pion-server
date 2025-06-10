@@ -12,7 +12,6 @@ require (
 )
 
 require (
-	github.com/at-wat/ebml-go v0.17.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/pion/datachannel v1.5.10 // indirect
 	github.com/pion/dtls/v3 v3.0.4 // indirect

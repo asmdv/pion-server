@@ -45,6 +45,8 @@ var (
 	mainLogger    = logging.NewDefaultLoggerFactory().NewLogger("sfu-ws")
 	bitrateLogger = logging.NewDefaultLoggerFactory().NewLogger("bitrate")
 	pacer         *gcc.LeakyBucketPacer
+
+	globalAPI *webrtc.API
 )
 
 // Logger struct holds the log file and logger instance
@@ -210,7 +212,11 @@ func main() {
 
 	// index.html handler
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if err = indexTemplate.Execute(w, "ws://"+r.Host+"/websocket?client=server"); err != nil {
+		host := os.Getenv("SFU_HOST")
+		if host == "" {
+			host = r.Host // fallback
+		}
+		if err = indexTemplate.Execute(w, "ws://"+host+"/websocket?client=server"); err != nil {
 			mainLogger.Errorf("Failed to parse index template: %v", err)
 		}
 	})
@@ -520,7 +526,20 @@ func websocketHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// api := webrtc.NewAPI()
-	peerConnection, err := webrtc.NewAPI(webrtc.WithInterceptorRegistry(interceptorRegistry), webrtc.WithMediaEngine(m)).NewPeerConnection(webrtc.Configuration{
+	settingEngine := webrtc.SettingEngine{}
+
+	// ❗将此 IP 替换为你宿主机的内网 IP，比如 192.168.1.100
+	settingEngine.SetNAT1To1IPs([]string{"192.168.1.158"}, webrtc.ICECandidateTypeHost)
+
+	settingEngine.SetEphemeralUDPPortRange(10000, 10100)
+
+	globalAPI = webrtc.NewAPI(
+		webrtc.WithSettingEngine(settingEngine),
+		webrtc.WithInterceptorRegistry(interceptorRegistry),
+		webrtc.WithMediaEngine(m),
+	)
+
+	peerConnection, err := globalAPI.NewPeerConnection(webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
 			{
 				URLs: []string{"stun:stun.l.google.com:19302"},

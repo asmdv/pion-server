@@ -9,7 +9,8 @@ import 'package:path_provider/path_provider.dart';
 
 // ... (Keep existing code: main, remoteHost, counter, mediaConstraints, etc.) ...
 void main() => runApp(const MyApp());
-String remoteHost = "192.168.1.158";
+//String remoteHost = "192.168.1.158";
+String remoteHost = "192.168.1.161";
 //String remoteHost = "172.16.2.37";
 //String remoteHost = "10.18.175.171";
 int counter = 0;
@@ -34,8 +35,11 @@ final mediaConstraints1 = <String, dynamic>{
   'audio': true,
   'video': {
     'mandatory': {
+      'minWidth': '1920',
+      'minHeight': '1080',
       'maxWidth': '3840',
       'maxHeight': '2160',
+      'minFrameRate': '10',
       'maxFrameRate': '60',
     },
     'facingMode': 'environment',
@@ -175,12 +179,19 @@ class _MyAppState extends State<MyApp> {
 
       num? targetBitrate;
       num? currentBitrate;
+      num? width;
+      num? height;
+      num? fps;
 
       for (var sender in senders) {
         if (sender.track?.kind == 'video') {
           final stats = await sender.getStats();
-
           for (var report in stats) {
+            /*print('📊 Report Type: ${report.type}');
+            report.values.forEach((key, value) {
+              print('   - $key: $value');
+            });
+            */
             if (report.type == 'outbound-rtp') {
               if (report.values['targetBitrate'] != null) {
                 targetBitrate = report.values['targetBitrate'];
@@ -198,7 +209,15 @@ class _MyAppState extends State<MyApp> {
                 _lastTimestamp = now;
               }
             }
+
+            if (report.type == 'media-source') {
+              width = report.values['width'];
+              height = report.values['height'];
+              fps = report.values['framesPerSecond'];
+            }
+
           }
+
 
           // Strategy-based reallocation logic
           /*if (targetBitrate != null && targetBitrate > 0) {
@@ -238,7 +257,7 @@ class _MyAppState extends State<MyApp> {
           final timestamp = DateTime.now().toIso8601String();
           //print(' Target Bitrate: ${(targetBitrate ?? 0) / 1000} kbps |  Current Bitrate: ${currentBitrate?.toStringAsFixed(2) ?? 'N/A'} kbps');
           //visualize target bitrate and current bitrate
-          print('$timestamp,${(targetBitrate ?? 0) / 1000},${currentBitrate?.toStringAsFixed(2) ?? 'N/A'}');
+          print('$timestamp,${(targetBitrate ?? 0) / 1000},${currentBitrate?.toStringAsFixed(2) ?? 'N/A'},${width ?? 'N/A'}x${height ?? 'N/A'},${fps?.toStringAsFixed(1) ?? 'N/A'}');
           break; // Assume only one video sender is managed
         }
       }

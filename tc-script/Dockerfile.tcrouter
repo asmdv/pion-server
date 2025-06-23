@@ -1,0 +1,25 @@
+FROM golang:1.23.3
+
+# 安装限速和系统工具
+RUN apt-get update && apt-get install -y iproute2 iputils-ping python3 curl && apt-get clean
+
+# 设置工作目录
+WORKDIR /app
+
+# 拷贝依赖管理文件（确保你在本地已有 go.mod 和 go.sum）
+COPY go.mod go.sum ./
+
+# 下载依赖
+RUN go mod download
+
+# 拷贝源代码
+COPY main.go .
+COPY index.html .
+COPY change_bandwidth.py .
+
+# 编译 SFU
+RUN go build -o sfu main.go
+
+# 启动 SFU 和限速控制
+CMD ["sh", "-c", "python3 /app/change_bandwidth.py & ./sfu"]
+

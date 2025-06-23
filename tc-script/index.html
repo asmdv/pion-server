@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+</head>
+<body>
+<h3> Local Video </h3>
+<input type="file" id="videoFileInput" accept="video/*"> <br />
+<video id="localVideo" autoplay loop></video> <br />
+
+<h3> Remote Video </h3>
+<div id="remoteVideos"></div> <br />
+
+<h3> Logs </h3>
+<div id="logs"></div>
+
+<h3> Bitrate Logs </h3>
+<div id="bitrateLogs"></div>
+
+<h3> Available Outgoing Bitrate </h3>
+<div id="availableBitrateLogs"></div>
+
+<h3> Codec Info </h3>
+<div id="codecLogs"></div>
+
+</body>
+
+<script>
+  const fileInput = document.getElementById('videoFileInput');
+  const localVideo = document.getElementById('localVideo');
+  let dataChannel; // Declare dataChannel globally
+
+  fileInput.addEventListener('change', function(event) {
+    const file = event.target.files[0];
+    if (file) {
+      const url = URL.createObjectURL(file);
+      localVideo.src = url;
+
+      localVideo.onloadeddata = () => {
+        try {
+          const stream = localVideo.captureStream();
+          if (stream && stream.getVideoTracks().length > 0) {
+              console.log("captureStream succeeded", stream);
+            } else {
+              console.warn(" captureStream returned no tracks or null");
+            }
+          stream.getVideoTracks().forEach(track => {
+            track.applyConstraints({
+              // width: { min: 1920, exact: 1920, max: 1920 },
+              // height: { min: 1x080, exact: 1080, max: 1080 },
+              // frameRate: { min: 1, exact: 1 , max: 1}
+            }).then(() => {
+              console.log('Current constraints:', track.getConstraints());
+            }).catch(e => console.error('Constraint error:', e));
+          });
+          setupPeerConnection(stream);
+        }
+        catch (e) {
+          console.error(" captureStream() failed:", e);
+        }
+      };
+    }
+  });
+
+  function setupPeerConnection(stream) {
+    let pc = new RTCPeerConnection();
+    const trackStats = new Map();
+    let dataChannel = pc.createDataChannel("metricsChannel");
+    dataChannel.onopen = () => console.log("Data channel opened");
+    dataChannel.onmessage = (event) => console.log("Message from server:", event.data);
+
+    // Add video and audio tracks from the file
+    stream.getTracks().forEach(track => pc.addTrack(track, stream));
+
+    const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+    if (sender) {
+      const params = sender.getParameters();
+      if (!params.encodings) {
+        params.encodings = [{}];
+      }
+      params.encodings[0].maxBitrate = 100_000_000; // Set max bitrate
+      params.encodings[0].degradationPreference = "disabled";
+      sender.setParameters(params).catch(e => console.error('Failed to set parameters:', e));
+    }
+
+    pc.ontrack = function (event) {
+      if (event.track.kind === 'audio') return;
+
+      let el = document.createElement(event.track.kind);
+      el.srcObject = event.streams[0];
+      el.autoplay = true;
+      el.controls = true;
+      document.getElementById('remoteVideos').appendChild(el);
+
+      const logStats = () => {
+        // Store last values for bitrate calculation (using closure)
+        let lastBytes = 0;
+        let lastTimestamp = 0;
+        let lastReportId = null; //handle the negative bitrate bug
+
+        return () => { // Return the actual function to be called by setInterval
+          pc.getStats(null).then(stats => {
+            let currentCodecId = null; // Variable to store codecId from inbound stream
+            let codecMimeType = 'N/A'; // Default value
+
+            // --- First pass: Find inbound video stream and its codecId ---
+            stats.forEach(report => {
+              // Use stable SSRC as key
+              if (report.type === 'inbound-rtp' && report.kind === 'video') {
+                const ssrcKey = report.ssrc?.toString(); // convert BigInt to string
+
+                if (!ssrcKey) return;
+
+                const prev = trackStats.get(ssrcKey);
+
+                if (!prev) {
+                  trackStats.set(ssrcKey, {
+                    lastBytes: report.bytesReceived,
+                    lastTimestamp: report.timestamp
+                  });
+                  console.log(`New track detected (SSRC: ${ssrcKey}), skipping bitrate calc this round`);
+                  return;
+                }
+
+                const byteDiff = report.bytesReceived - prev.lastBytes;
+                const timeDiff = report.timestamp - prev.lastTimestamp || 1; // avoid div by 0
+                const bitrate = (byteDiff * 8) / timeDiff; // bits/ms = kbps
+
+                console.log(`SSRC ${ssrcKey}: Δt=${Math.round(timeDiff)}ms, bitrate=${Math.round(bitrate)} kbps`);
+
+                trackStats.set(ssrcKey, {
+                  lastBytes: report.bytesReceived,
+                  lastTimestamp: report.timestamp
+                });
+
+                // Optional: Show the latest bitrate from any track (or average if needed)
+                document.getElementById('bitrateLogs').innerText =
+                `Bitrate: ${Math.round(bitrate)} kbps`;
+
+                currentCodecId = report.codecId;
+
+                // Get resolution/framerate (existing logic)
+                const [videoTrack] = event.streams[0].getVideoTracks();
+                if (videoTrack) {
+                  const { width, height, frameRate } = videoTrack.getSettings();
+                  document.getElementById('logs').innerText = `Resolution: ${width}x${height}, Frame rate: ${frameRate ? frameRate.toFixed(2) : 'N/A'} fps`;
+
+                  // Send metrics via data channel (existing logic)
+                  if (dataChannel && dataChannel.readyState === 'open') {
+                    const metric = {
+                      resolution: `${width}x${height}`,
+                      frameRate: frameRate,
+                      bitrateKbps: Math.round(bitrate / 1000),
+                      timestamp: Date.now()
+                    };
+                    // dataChannel.send(JSON.stringify(metric)); // Uncomment if needed
+                    // console.log("Metric sent:", metric);
+                  }
+                }
+              }
+
+              // Get available outgoing bitrate (existing logic)
+              if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.nominated && report.availableOutgoingBitrate !== undefined) {
+                const availableBitrateKbps = Math.round(report.availableOutgoingBitrate / 1000);
+                document.getElementById('availableBitrateLogs').innerText = `Available Outgoing Bitrate: ${availableBitrateKbps} kbps`;
+              }
+            });
+
+            // --- Second pass/Lookup: Find the codec details using the codecId ---
+            if (currentCodecId) {
+              const codecReport = stats.get(currentCodecId); // Look up the codec report by its ID
+              if (codecReport && codecReport.mimeType) {
+                codecMimeType = codecReport.mimeType;
+                // Optionally add clockRate or sdpFmtpLine if needed
+                // codecMimeType += ` (ClockRate: ${codecReport.clockRate})`;
+              }
+            }
+
+            // --- Update the Codec Info display ---
+            document.getElementById('codecLogs').innerText = `Codec: ${codecMimeType}`;
+
+          }).catch(e => console.error('Error fetching stats:', e));
+        }; // End of returned function
+      }; // End of logStats definition
+
+      // Initialize and start the interval timer
+      setInterval(logStats(), 1000); // Call logStats() to get the inner function
+
+
+      event.track.onmute = function() {
+        el.play();
+      };
+
+      event.streams[0].onremovetrack = ({ track }) => {
+        if (el.parentNode) {
+          el.parentNode.removeChild(el);
+        }
+      };
+    };
+
+    let ws = new WebSocket("{{.}}");
+
+    pc.onicecandidate = e => {
+      if (e.candidate) {
+        ws.send(JSON.stringify({ event: 'candidate', data: JSON.stringify(e.candidate) }));
+      }
+    };
+
+    ws.onmessage = async (msg) => {
+      const message = JSON.parse(msg.data);
+      switch (message.event) {
+        case 'offer':
+          const offer = JSON.parse(message.data);
+          await pc.setRemoteDescription(offer);
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          ws.send(JSON.stringify({ event: 'answer', data: JSON.stringify(answer) }));
+          break;
+        case 'candidate':
+          const candidate = JSON.parse(message.data);
+          await pc.addIceCandidate(candidate);
+          break;
+      }
+    };
+
+    pc.onicecandidate = e => {
+      if (e.candidate) {
+        ws.send(JSON.stringify({ event: 'candidate', data: JSON.stringify(e.candidate) }));
+      }
+    };
+  }
+</script>
+</html>
